@@ -648,10 +648,8 @@ export default function App(): ReactElement {
   const [promptLevel, setPromptLevel] = useState<string>("Beginner");
   const [promptTotalTopics, setPromptTotalTopics] = useState<number>(10);
   const [promptTopicRange, setPromptTopicRange] = useState<string>("1-2");
-  const [promptMinQs] = useState<number>(40);
-  const [promptMaxQs] = useState<number>(60);
-
-
+    const [promptMinQs] = useState<number>(40);
+    const [promptMaxQs] = useState<number>(60);
 
 
   const [topicPromptList, setTopicPromptList] = useState<string>(
@@ -3222,14 +3220,12 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
     triggerAutoAdvance();
   };
 
-  const triggerAutoAdvance = (): void => {
-    setAutoAdvanceCountdown(100);
-    setTimeout(() => {
-      handleNextQuestion();
-    }, 1500);
-  };
-
-
+    const triggerAutoAdvance = (): void => {
+      setAutoAdvanceCountdown(100);
+      setTimeout(() => {
+        handleNextQuestion();
+      }, 1500);
+    };
 
 
   const handleNextQuestion = (): void => {
