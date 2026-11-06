@@ -16,11 +16,11 @@ import {
   Download,
   Upload,
   Copy,
+  Check,
   FileText,
   X,
   Music,
   Pause,
-  Clock,
   Settings,
   RefreshCw,
   Layers,
@@ -636,11 +636,12 @@ export default function App(): ReactElement {
   >("subject");
   const [importSourceText, setImportSourceText] = useState<string>("");
   const [importTargetTopicId, setImportTargetTopicId] = useState<string>("");
-  const [importTargetTopicMode, setImportTargetTopicMode] = useState<
-    "auto" | "existing" | "custom"
-  >("auto");
-  const [importCustomTopicTitle, setImportCustomTopicTitle] =
-    useState<string>("");
+  const [importTargetTopicMode] = useState<"auto" | "existing" | "custom">(
+    "auto",
+  );
+
+  const [importCustomTopicTitle] = useState<string>("");
+
   const [copiedPrompt, setCopiedPrompt] = useState<boolean>(false);
 
   // Prompt Form States - Defaulting to Universal, General Non-Technical Subjects
@@ -648,9 +649,8 @@ export default function App(): ReactElement {
   const [promptLevel, setPromptLevel] = useState<string>("Beginner");
   const [promptTotalTopics, setPromptTotalTopics] = useState<number>(10);
   const [promptTopicRange, setPromptTopicRange] = useState<string>("1-2");
-    const [promptMinQs] = useState<number>(40);
-    const [promptMaxQs] = useState<number>(60);
-
+  const [promptMinQs, setPromptMinQs] = useState<number>(40);
+  const [promptMaxQs, setPromptMaxQs] = useState<number>(60);
 
   const [topicPromptList, setTopicPromptList] = useState<string>(
     "Oceans & Continents; World Capitals; Famous Landmarks",
@@ -677,8 +677,9 @@ export default function App(): ReactElement {
   const [rangeStartOrder, setRangeStartOrder] = useState<number>(1);
   const [rangeEndOrder, setRangeEndOrder] = useState<number>(1);
   const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([]);
-  const [customTimerInput, setCustomTimerInput] = useState<string>("45");
+const [customTimerInput] = useState<string>("45");
   const [useCustomTimer, setUseCustomTimer] = useState<boolean>(false);
+  const [autoAdvanceEnabled, setAutoAdvanceEnabled] = useState<boolean>(false); // Disabled by default
 
   // Initial Subjects Setup
   const [subjects, setSubjects] = useState<Subject[]>([
@@ -2461,14 +2462,14 @@ FINAL CHECK (silently, before sending)
               )}
             </div>
           )}
-
-          {/* VIEW 3: INTELLIGENT AUTO-ADVANCING QUIZ SCREEN */}
+          {/* VIEW 3: INTELLIGENT QUIZ SCREEN WITH 4 DISTINCT OPTION COLORS */}
           {currentView === "quiz" && (
             <IntelligentQuizRunner
               title={quizTitle}
               questions={quizQuestions}
               soundEnabled={soundEnabled}
               timerSecondsDefault={quizTimerSeconds}
+              autoAdvanceDefault={autoAdvanceEnabled}
               onExit={() => setCurrentView("subject")}
             />
           )}
@@ -2816,26 +2817,19 @@ FINAL CHECK (silently, before sending)
               ))}
             </div>
 
-            <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <div className="flex items-center justify-between gap-2 mt-3 p-2.5 rounded-xl border-2 border-[var(--ink)] bg-[var(--bg)]">
               <label className="flex items-center gap-2 text-xs font-bold cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={useCustomTimer}
-                  onChange={(e) => setUseCustomTimer(e.target.checked)}
-                  className="accent-[var(--teal)] cursor-pointer shrink-0"
+                  checked={autoAdvanceEnabled}
+                  onChange={(e) => setAutoAdvanceEnabled(e.target.checked)}
+                  className="w-4 h-4 accent-[var(--teal)] cursor-pointer shrink-0"
                 />
-                Custom Timer (Sec):
+                Auto-Advance to next question
               </label>
-              {useCustomTimer && (
-                <input
-                  type="number"
-                  min={5}
-                  max={300}
-                  value={customTimerInput}
-                  onChange={(e) => setCustomTimerInput(e.target.value)}
-                  className="w-16 bg-[var(--bg)] border-2 border-[var(--ink)] rounded-xl p-1 font-bold text-xs text-center"
-                />
-              )}
+              <span className="text-[10px] font-bold opacity-75">
+                {autoAdvanceEnabled ? "Enabled" : "Disabled"}
+              </span>
             </div>
           </div>
 
@@ -2858,233 +2852,205 @@ FINAL CHECK (silently, before sending)
         </div>
       </Modal>
 
-      {/* 5. Import Modal (Subject & Topic Levels) */}
+      {/* 5. Complete Import Modal */}
       <Modal
         isOpen={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
         title={
           importType === "platform"
             ? "Restore Platform Backup"
-            : importType === "subject"
-              ? "Import Subject File"
-              : "Import Topics File"
+            : importType === "topic"
+              ? "Import Topics into Subject"
+              : "Import New Subject"
         }
       >
         <div className="space-y-4">
-          {/* Target Topic Selection Control for Topic Importer */}
-          {importType === "topic" && activeSubject && (
-            <div className="bg-[var(--surface)] border-2 border-[var(--ink)] p-3 rounded-2xl space-y-2">
-              <label className="block text-xs font-extrabold uppercase">
-                Destination Topic Control
-              </label>
-              <div className="grid grid-cols-3 gap-1.5 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setImportTargetTopicMode("auto")}
-                  className={`p-2 rounded-xl border-2 font-bold ${importTargetTopicMode === "auto" ? "bg-[var(--yellow)] border-[var(--ink)]" : "bg-[var(--bg)] border-transparent"}`}
-                >
-                  From File Headers
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImportTargetTopicMode("existing")}
-                  className={`p-2 rounded-xl border-2 font-bold ${importTargetTopicMode === "existing" ? "bg-[var(--yellow)] border-[var(--ink)]" : "bg-[var(--bg)] border-transparent"}`}
-                >
-                  Merge Existing Topic
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImportTargetTopicMode("custom")}
-                  className={`p-2 rounded-xl border-2 font-bold ${importTargetTopicMode === "custom" ? "bg-[var(--yellow)] border-[var(--ink)]" : "bg-[var(--bg)] border-transparent"}`}
-                >
-                  Custom Topic Title
-                </button>
-              </div>
+          {/* AI Generator Prompt Section */}
+          <div className="bg-[var(--yellow)]/30 border-3 border-[var(--ink)] shadow-hard rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="font-extrabold text-xs sm:text-sm uppercase tracking-wider text-[var(--ink)] flex items-center gap-1.5">
+                ✨ AI Generator Prompt
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  handleCopyPrompt(
+                    importType === "topic"
+                      ? getTopicPromptText()
+                      : getSubjectPromptText(),
+                  )
+                }
+                className="text-xs font-extrabold px-3 py-1.5 rounded-xl border-2 border-[var(--ink)] bg-[var(--surface)] hover:bg-[var(--lime)] text-[var(--ink)] flex items-center gap-1 transition-colors cursor-pointer"
+              >
+                {copiedPrompt ? (
+                  <Check size={14} className="text-[var(--teal)]" />
+                ) : (
+                  <Copy size={14} />
+                )}
+                {copiedPrompt ? "Copied!" : "Copy Prompt"}
+              </button>
+            </div>
 
-              {importTargetTopicMode === "existing" && (
-                <div className="mt-2">
-                  <label className="block text-[10px] font-bold uppercase mb-1">
-                    Select Topic
-                  </label>
-                  <select
-                    value={importTargetTopicId}
-                    onChange={(e) => setImportTargetTopicId(e.target.value)}
-                    className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-xl p-2 font-bold text-xs"
-                  >
-                    {activeSubject.topics.map((t: Topic) => (
-                      <option key={t.id} value={t.id}>
-                        Topic #{t.order}: {t.title}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {importTargetTopicMode === "custom" && (
-                <div className="mt-2">
-                  <label className="block text-[10px] font-bold uppercase mb-1">
-                    Type Topic Title
+            {importType !== "topic" ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Subject Title
                   </label>
                   <input
                     type="text"
-                    value={importCustomTopicTitle}
-                    onChange={(e) => setImportCustomTopicTitle(e.target.value)}
-                    placeholder="e.g. Mathematics Basics, Coding Fundamentals..."
-                    className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-xl p-2 font-bold text-xs"
+                    value={promptSubject}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setPromptSubject(e.target.value)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
                   />
                 </div>
-              )}
-            </div>
-          )}
-
-          {/* AI Generator Banner & Form */}
-          {importType !== "platform" && (
-            <div className="bg-[var(--yellow)]/30 border-3 border-[var(--ink)] shadow-hard p-3 sm:p-4 rounded-2xl space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-extrabold text-xs sm:text-sm flex items-center gap-1">
-                  ✨ AI Prompt Generator (
-                  {importType === "subject" ? "Subject" : "Topics"})
-                </span>
-                <Button
-                  type="button"
-                  variant="primary"
-                  className="text-xs px-2 py-1"
-                  onClick={() =>
-                    handleCopyPrompt(
-                      importType === "subject"
-                        ? getSubjectPromptText()
-                        : getTopicPromptText(),
-                    )
-                  }
-                >
-                  <Copy size={12} /> {copiedPrompt ? "Copied!" : "Copy"}
-                </Button>
-              </div>
-
-              {importType === "subject" ? (
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div>
-                    <label className="font-bold block text-[10px] uppercase">
-                      Subject Title
-                    </label>
-                    <input
-                      type="text"
-                      value={promptSubject}
-                      onChange={(e) => setPromptSubject(e.target.value)}
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="font-bold block text-[10px] uppercase">
-                      Difficulty Level
-                    </label>
-                    <select
-                      value={promptLevel}
-                      onChange={(e) => setPromptLevel(e.target.value)}
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
-                    >
-                      <option value="Beginner">Beginner</option>
-                      <option value="Intermediate">Intermediate</option>
-                      <option value="Advanced">Advanced</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="font-bold block text-[10px] uppercase">
-                      Total Topics
-                    </label>
-                    <input
-                      type="number"
-                      value={promptTotalTopics}
-                      onChange={(e) =>
-                        setPromptTotalTopics(parseInt(e.target.value, 10) || 1)
-                      }
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="font-bold block text-[10px] uppercase">
-                      Topic Range
-                    </label>
-                    <input
-                      type="text"
-                      value={promptTopicRange}
-                      onChange={(e) => setPromptTopicRange(e.target.value)}
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
-                    />
-                  </div>
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Level
+                  </label>
+                  <select
+                    value={promptLevel}
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                      setPromptLevel(e.target.value)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs cursor-pointer"
+                  >
+                    <option value="Beginner">Beginner</option>
+                    <option value="Intermediate">Intermediate</option>
+                    <option value="Advanced">Advanced</option>
+                  </select>
                 </div>
-              ) : (
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="col-span-2">
-                    <label className="font-bold block text-[10px] uppercase">
-                      Target Topics (Semicolon Separated)
-                    </label>
-                    <input
-                      type="text"
-                      value={topicPromptList}
-                      onChange={(e) => setTopicPromptList(e.target.value)}
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
-                    />
-                  </div>
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Total Topics
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={promptTotalTopics}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setPromptTotalTopics(parseInt(e.target.value, 10) || 1)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Topic Range
+                  </label>
+                  <input
+                    type="text"
+                    value={promptTopicRange}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setPromptTopicRange(e.target.value)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Min Qs / Topic
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={promptMinQs}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setPromptMinQs(parseInt(e.target.value, 10) || 1)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Max Qs / Topic
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={promptMaxQs}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setPromptMaxQs(parseInt(e.target.value, 10) || 1)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div>
+                  <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                    Target Topics (Semicolon separated)
+                  </label>
+                  <input
+                    type="text"
+                    value={topicPromptList}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setTopicPromptList(e.target.value)
+                    }
+                    className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="font-bold block text-[10px] uppercase">
-                      Min Qs Per Topic
+                    <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                      Min Qs / Topic
                     </label>
                     <input
                       type="number"
+                      min={1}
                       value={topicPromptMinQs}
-                      onChange={(e) =>
+                      onChange={(e: ChangeEvent<HTMLInputElement>) =>
                         setTopicPromptMinQs(parseInt(e.target.value, 10) || 1)
                       }
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
+                      className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
                     />
                   </div>
                   <div>
-                    <label className="font-bold block text-[10px] uppercase">
-                      Max Qs Per Topic
+                    <label className="text-[10px] font-extrabold uppercase block mb-0.5">
+                      Max Qs / Topic
                     </label>
                     <input
                       type="number"
+                      min={1}
                       value={topicPromptMaxQs}
-                      onChange={(e) =>
+                      onChange={(e: ChangeEvent<HTMLInputElement>) =>
                         setTopicPromptMaxQs(parseInt(e.target.value, 10) || 1)
                       }
-                      className="w-full bg-[var(--surface)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs"
+                      className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-lg p-1.5 font-bold text-xs"
                     />
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-
-          <div>
-            <label className="block text-xs font-extrabold uppercase mb-1">
-              {importType === "platform"
-                ? "Select Platform JSON File"
-                : "Upload Study Document (.md or .json)"}
-            </label>
-            <input
-              type="file"
-              accept={importType === "platform" ? ".json" : ".md,.json,.txt"}
-              onChange={handleFileUpload}
-              className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-2xl p-2 text-xs font-bold cursor-pointer"
-            />
+              </div>
+            )}
           </div>
 
+          {/* Import Source Inputs */}
           <div>
-            <label className="block text-xs font-extrabold uppercase mb-1">
-              Or Paste Document Content
-            </label>
+            <div className="flex justify-between items-center mb-1">
+              <label className="block text-xs font-extrabold uppercase">
+                Paste Markdown / JSON Content
+              </label>
+              <label className="text-xs font-extrabold text-[var(--orange)] hover:underline cursor-pointer flex items-center gap-1">
+                <Upload size={12} /> Upload .md / .json
+                <input
+                  type="file"
+                  accept=".md,.markdown,.json"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+              </label>
+            </div>
             <textarea
-              rows={5}
+              rows={6}
               value={importSourceText}
-              onChange={(e) => setImportSourceText(e.target.value)}
-              placeholder={
-                importType === "platform"
-                  ? "Paste platform backup JSON content..."
-                  : "Paste StudyNode markdown content..."
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                setImportSourceText(e.target.value)
               }
-              className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-2xl p-2.5 font-mono text-xs outline-none focus:bg-[var(--surface)]"
+              placeholder="Paste StudyNode .md content or JSON file here..."
+              className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-2xl p-3 font-mono text-xs outline-none focus:bg-[var(--surface)]"
             />
           </div>
 
@@ -3101,7 +3067,7 @@ FINAL CHECK (silently, before sending)
               variant="primary"
               onClick={handleExecuteImport}
             >
-              Execute Import
+              <Upload size={15} /> Execute Import
             </Button>
           </div>
         </div>
@@ -3110,12 +3076,13 @@ FINAL CHECK (silently, before sending)
   );
 }
 
-// --- Intelligent Quiz Runner Component with Auto-Advance & Gamified Streaks ---
+// --- Intelligent Quiz Runner Component with 4 Distinct Option Colors & Optional Auto-Advance ---
 interface IntelligentQuizRunnerProps {
   title: string;
   questions: Item[];
   soundEnabled: boolean;
   timerSecondsDefault: number;
+  autoAdvanceDefault?: boolean;
   onExit: () => void;
 }
 
@@ -3124,6 +3091,7 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
   questions,
   soundEnabled,
   timerSecondsDefault,
+  autoAdvanceDefault = false,
   onExit,
 }) => {
   const [currentIndex, setCurrentIndex] = useState<number>(0);
@@ -3135,7 +3103,8 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
   const [streakPopup, setStreakPopup] = useState<string | null>(null);
   const [isFinished, setIsFinished] = useState<boolean>(false);
 
-  // Timer & Auto-Advance States
+  // Timer & Auto-Advance Control
+  const [autoAdvance, setAutoAdvance] = useState<boolean>(autoAdvanceDefault);
   const [timeLeft, setTimeLeft] = useState<number>(timerSecondsDefault);
   const [autoAdvanceCountdown, setAutoAdvanceCountdown] = useState<
     number | null
@@ -3143,8 +3112,27 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
   const [userAnswers, setUserAnswers] = useState<
     { question: Item; chosenOptId: string | null; isCorrect: boolean }[]
   >([]);
+  const autoAdvanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  // 4 Distinct Retro Box Backgrounds matching classic Babadum style
+  const optionBoxColors = [
+    "bg-[#EFE8D8] border-[var(--ink)] hover:bg-[var(--yellow)]/40",
+    "bg-[#E9E4D4] border-[var(--ink)] hover:bg-[var(--lime)]/40",
+    "bg-[#E5E0CF] border-[var(--ink)] hover:bg-[var(--periwinkle)]/40",
+    "bg-[#E2DDD0] border-[var(--ink)] hover:bg-[var(--slate)]/40",
+  ];
 
   const currentQuestion = questions[currentIndex];
+
+  // Cleanup auto-advance timer on unmount
+  useEffect(() => {
+    return () => {
+      if (autoAdvanceTimerRef.current)
+        clearTimeout(autoAdvanceTimerRef.current);
+    };
+  }, []);
 
   // Per-Question Timer Logic
   useEffect(() => {
@@ -3175,7 +3163,9 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
       ...prev,
       { question: currentQuestion, chosenOptId: null, isCorrect: false },
     ]);
-    triggerAutoAdvance();
+    if (autoAdvance) {
+      triggerAutoAdvance();
+    }
   };
 
   const handleSelectOption = (optId: string): void => {
@@ -3217,18 +3207,22 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
       ...prev,
       { question: currentQuestion, chosenOptId: optId, isCorrect },
     ]);
-    triggerAutoAdvance();
+
+    if (autoAdvance) {
+      triggerAutoAdvance();
+    }
   };
 
-    const triggerAutoAdvance = (): void => {
-      setAutoAdvanceCountdown(100);
-      setTimeout(() => {
-        handleNextQuestion();
-      }, 1500);
-    };
-
+  const triggerAutoAdvance = (): void => {
+    setAutoAdvanceCountdown(100);
+    if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current);
+    autoAdvanceTimerRef.current = setTimeout(() => {
+      handleNextQuestion();
+    }, 1500);
+  };
 
   const handleNextQuestion = (): void => {
+    if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current);
     setSelectedOptId(null);
     setIsAnswered(false);
     setAutoAdvanceCountdown(null);
@@ -3253,7 +3247,7 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
     );
   }
 
-  // Quiz Completion & Emotional Celebration Screen
+  // Quiz Completion Screen
   if (isFinished) {
     const percentage = Math.round((score / questions.length) * 100);
     let titleMsg = "Good Effort! 💪";
@@ -3309,7 +3303,7 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
           </div>
         </div>
 
-        {/* Detailed Question Review */}
+        {/* Question Performance Review */}
         <div className="text-left space-y-2 sm:space-y-3 pt-1">
           <h4 className="font-extrabold text-base sm:text-lg border-b-2 border-[var(--ink)]/15 pb-2">
             Question Performance Breakdown
@@ -3367,45 +3361,57 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
   }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-3 sm:space-y-5">
-      {/* Quiz Top Bar */}
-      <div className="flex items-center justify-between gap-2 bg-[var(--surface)] border-ink shadow-hard rounded-2xl p-2.5 sm:p-4">
-        <Button
-          variant="secondary"
-          className="text-xs px-2.5 py-1 sm:px-3 sm:py-1.5"
+    <div className="max-w-3xl mx-auto space-y-4">
+      {/* Outer Shell matching user screenshot layout */}
+      <div className="bg-[var(--surface)] border-[3px] border-[var(--ink)] shadow-hard rounded-[24px] p-3 sm:p-4 flex items-center justify-between gap-3">
+        <button
+          type="button"
           onClick={onExit}
+          className="font-bold text-xs sm:text-sm px-4 py-1.5 sm:py-2 rounded-2xl bg-[var(--bg)] hover:bg-[var(--yellow)] text-[var(--ink)] border-2 border-[var(--ink)] shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
         >
-          <ArrowLeft size={13} /> Exit
-        </Button>
-        <span className="font-extrabold text-xs sm:text-sm truncate max-w-[140px] sm:max-w-xs">
+          <ArrowLeft size={15} strokeWidth={2.5} /> Exit
+        </button>
+
+        <span className="font-extrabold text-xs sm:text-sm md:text-base text-[var(--ink)] truncate max-w-[200px] sm:max-w-md text-center">
           {title}
         </span>
-        <div className="flex items-center gap-1.5">
+
+        <div className="flex items-center gap-2 shrink-0">
+          <label className="hidden sm:flex items-center gap-1.5 text-[11px] font-bold bg-[var(--bg)] px-2.5 py-1 rounded-xl border-2 border-[var(--ink)] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoAdvance}
+              onChange={(e) => setAutoAdvance(e.target.checked)}
+              className="accent-[var(--teal)] cursor-pointer"
+            />
+            Auto Next
+          </label>
+
           {timerSecondsDefault > 0 && (
-            <Badge
-              color={timeLeft <= 5 ? "var(--red)" : "var(--yellow)"}
-              className="text-[11px] sm:text-xs"
+            <span
+              className={`font-extrabold text-xs px-2.5 py-1 rounded-xl border-2 border-[var(--ink)] ${timeLeft <= 5 ? "bg-[var(--red)] text-white" : "bg-[var(--yellow)]"}`}
             >
-              <Clock size={12} /> {timeLeft}s
-            </Badge>
+              ⏱ {timeLeft}s
+            </span>
           )}
-          <Badge color="var(--periwinkle)">
+
+          <span className="font-extrabold text-xs sm:text-sm px-3 py-1.5 rounded-2xl bg-[var(--periwinkle)] border-2 border-[var(--ink)] text-[var(--ink)] shrink-0">
             {currentIndex + 1} / {questions.length}
-          </Badge>
+          </span>
         </div>
       </div>
 
-      {/* Dynamic Streak Popup */}
+      {/* Dynamic Streak Notification */}
       {streakPopup && (
-        <div className="bg-[var(--orange)] text-[var(--ink)] border-ink shadow-hard p-2 sm:p-2.5 rounded-2xl text-center font-extrabold text-sm sm:text-base tracking-wide animate-streak">
+        <div className="bg-[var(--orange)] text-[var(--ink)] border-[3px] border-[var(--ink)] shadow-hard p-2.5 rounded-2xl text-center font-extrabold text-sm sm:text-base tracking-wide animate-streak">
           {streakPopup}
         </div>
       )}
 
-      {/* Main MCQ Card */}
-      <div className="bg-[var(--surface)] border-ink shadow-hard rounded-[22px] sm:rounded-[28px] p-4 sm:p-6 md:p-8 space-y-4 sm:space-y-6 relative overflow-hidden">
+      {/* Main MCQ Card matching exact screenshot proportions */}
+      <div className="bg-[var(--surface)] border-[3px] border-[var(--ink)] shadow-hard rounded-[32px] p-5 sm:p-8 md:p-10 space-y-6 relative">
         {/* Progress Bar */}
-        <div className="w-full bg-[var(--bg)] h-2 sm:h-2.5 rounded-full border border-[var(--ink)]/20 overflow-hidden">
+        <div className="w-full bg-[var(--bg)] h-3 rounded-full border-2 border-[var(--ink)] overflow-hidden">
           <div
             className="bg-[var(--teal)] h-full transition-all duration-300"
             style={{
@@ -3415,20 +3421,20 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
         </div>
 
         <div>
-          <span className="font-extrabold text-[10px] sm:text-xs bg-[var(--yellow)] border-ink px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-xl inline-block mb-1.5">
+          <span className="font-extrabold text-xs bg-[var(--yellow)] border-2 border-[var(--ink)] px-3 py-1 rounded-2xl inline-block mb-3">
             Question #{currentIndex + 1}
           </span>
-          <h3 className="font-extrabold text-lg sm:text-xl md:text-2xl leading-snug break-words">
+          <h3 className="font-extrabold text-xl sm:text-2xl md:text-3xl leading-snug break-words">
             {currentQuestion.prompt}
           </h3>
         </div>
 
-        {/* Options List */}
-        <div className="grid grid-cols-1 gap-2.5 sm:gap-3">
+        {/* 4 Distinct Colored Option Box Containers matching screenshot */}
+        <div className="grid grid-cols-1 gap-3.5 sm:gap-4">
           {currentQuestion.options.map((opt: ItemOption, idx: number) => {
             const isChosen = selectedOptId === opt.id;
-            let optStyle =
-              "bg-[var(--bg)] border-2 border-[var(--ink)] hover:bg-[var(--yellow)]/30";
+            const defaultBoxBg = optionBoxColors[idx % optionBoxColors.length];
+            let optStyle = `${defaultBoxBg} border-2 border-[var(--ink)]`;
             let icon: ReactElement | null = null;
 
             if (isAnswered) {
@@ -3437,7 +3443,7 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
                   "bg-[var(--lime)] border-3 border-[var(--ink)] shadow-xs";
                 icon = (
                   <CheckCircle2
-                    size={18}
+                    size={22}
                     className="text-[var(--ink)] shrink-0"
                   />
                 );
@@ -3445,7 +3451,7 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
                 optStyle =
                   "bg-[var(--red)]/20 border-3 border-[var(--red)] animate-shake";
                 icon = (
-                  <XCircle size={18} className="text-[var(--red)] shrink-0" />
+                  <XCircle size={22} className="text-[var(--red)] shrink-0" />
                 );
               } else {
                 optStyle =
@@ -3459,13 +3465,13 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
                 type="button"
                 disabled={isAnswered}
                 onClick={() => handleSelectOption(opt.id)}
-                className={`p-3 sm:p-4 rounded-2xl font-bold text-xs sm:text-sm md:text-base text-left flex items-center justify-between gap-2.5 cursor-pointer transition-all ${optStyle}`}
+                className={`p-3.5 sm:p-4 rounded-2xl font-bold text-sm sm:text-base text-left flex items-center justify-between gap-3 cursor-pointer transition-all babadum-btn ${optStyle}`}
               >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span className="w-6 h-6 sm:w-7 sm:h-7 rounded-xl bg-[var(--surface)] border-2 border-[var(--ink)] flex items-center justify-center font-extrabold text-xs shrink-0">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <span className="w-8 h-8 sm:w-9 sm:h-9 rounded-2xl bg-[var(--surface)] border-2 border-[var(--ink)] flex items-center justify-center font-extrabold text-xs sm:text-sm shrink-0 shadow-xs">
                     {String.fromCharCode(65 + idx)}
                   </span>
-                  <span className="break-words">{opt.text}</span>
+                  <span className="break-words leading-snug">{opt.text}</span>
                 </div>
                 {icon}
               </button>
@@ -3473,28 +3479,44 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
           })}
         </div>
 
-        {/* Answer Explanation Box */}
-        {isAnswered && currentQuestion.explanation && (
-          <div className="bg-[var(--bg)] border-2 border-[var(--ink)] p-3 sm:p-4 rounded-2xl text-xs space-y-1 animate-streak">
-            <span className="font-extrabold text-[var(--orange)] flex items-center gap-1">
-              💡 Explanation:
-            </span>
-            <p className="font-medium opacity-90 leading-relaxed break-words">
-              {currentQuestion.explanation}
-            </p>
-          </div>
-        )}
+        {/* Explanation & Manual Next Step */}
+        {isAnswered && (
+          <div className="space-y-4 pt-2 border-t-2 border-[var(--ink)]/15 animate-streak">
+            {currentQuestion.explanation && (
+              <div className="bg-[var(--bg)] border-2 border-[var(--ink)] p-4 rounded-2xl text-xs sm:text-sm space-y-1">
+                <span className="font-extrabold text-[var(--orange)] flex items-center gap-1 text-xs uppercase tracking-wider">
+                  💡 Explanation:
+                </span>
+                <p className="font-medium opacity-90 leading-relaxed break-words">
+                  {currentQuestion.explanation}
+                </p>
+              </div>
+            )}
 
-        {/* Auto-Advance Visual Progress Indicator */}
-        {isAnswered && autoAdvanceCountdown !== null && (
-          <div className="pt-1 sm:pt-2">
-            <div className="flex justify-between text-[10px] sm:text-[11px] font-bold mb-1 opacity-75">
-              <span>Auto-advancing to next question...</span>
-              <span>Next ➔</span>
-            </div>
-            <div className="w-full bg-[var(--bg)] h-1.5 sm:h-2 rounded-full overflow-hidden border border-[var(--ink)]">
-              <div className="bg-[var(--orange)] h-full w-full animate-pulse" />
-            </div>
+            {/* Manual Next Question Button when Auto-Advance is Off */}
+            {!autoAdvance && (
+              <div className="flex justify-end">
+                <Button
+                  variant="primary"
+                  className="text-sm px-6 py-3"
+                  onClick={handleNextQuestion}
+                >
+                  Next Question ➔
+                </Button>
+              </div>
+            )}
+
+            {autoAdvance && autoAdvanceCountdown !== null && (
+              <div className="pt-1">
+                <div className="flex justify-between text-xs font-bold mb-1 opacity-75">
+                  <span>Auto-advancing...</span>
+                  <span>Next ➔</span>
+                </div>
+                <div className="w-full bg-[var(--bg)] h-2 rounded-full overflow-hidden border-2 border-[var(--ink)]">
+                  <div className="bg-[var(--orange)] h-full w-full animate-pulse" />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
