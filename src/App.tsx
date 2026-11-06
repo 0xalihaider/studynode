@@ -16,14 +16,12 @@ import {
   Download,
   Upload,
   Copy,
-  Check,
   FileText,
   X,
   Music,
   Pause,
   Clock,
   Settings,
-  Award,
   RefreshCw,
   Layers,
   Moon,
@@ -650,8 +648,11 @@ export default function App(): ReactElement {
   const [promptLevel, setPromptLevel] = useState<string>("Beginner");
   const [promptTotalTopics, setPromptTotalTopics] = useState<number>(10);
   const [promptTopicRange, setPromptTopicRange] = useState<string>("1-2");
-  const [promptMinQs, setPromptMinQs] = useState<number>(40);
-  const [promptMaxQs, setPromptMaxQs] = useState<number>(60);
+  const [promptMinQs] = useState<number>(40);
+  const [promptMaxQs] = useState<number>(60);
+
+
+
 
   const [topicPromptList, setTopicPromptList] = useState<string>(
     "Oceans & Continents; World Capitals; Famous Landmarks",
@@ -3223,11 +3224,13 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
 
   const triggerAutoAdvance = (): void => {
     setAutoAdvanceCountdown(100);
-    const timer = setTimeout(() => {
+    setTimeout(() => {
       handleNextQuestion();
     }, 1500);
-    return () => clearTimeout(timer);
   };
+
+
+
 
   const handleNextQuestion = (): void => {
     setSelectedOptId(null);
