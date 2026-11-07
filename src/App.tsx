@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { ReactElement, FormEvent, MouseEvent, ChangeEvent } from "react";
 import {
   BookOpen,
@@ -22,11 +22,19 @@ import {
   Music,
   Pause,
   Settings,
+  Award,
   RefreshCw,
   Layers,
   Moon,
   Sun,
 } from "lucide-react";
+
+// --- Unique ID Generator Utility ---
+let globalIdCounter = 0;
+const uid = (prefix: string = "id"): string => {
+  globalIdCounter += 1;
+  return `${prefix}-${Date.now()}-${globalIdCounter}-${Math.random().toString(36).substring(2, 7)}`;
+};
 
 // --- Types & Interfaces ---
 export interface ItemOption {
@@ -55,7 +63,7 @@ export interface Subject {
   title: string;
   description: string;
   color: string;
-  icon: typeof BookOpen;
+  iconName?: string;
   topics: Topic[];
 }
 
@@ -321,15 +329,104 @@ const globalStyles = `
   }
 `;
 
-// Simple Markdown Parser for StudyNode Documents
+// --- IndexedDB Persistence Helper ---
+const DB_NAME = "StudyNodeDB";
+const DB_VERSION = 1;
+const STORE_NAME = "user_data";
+
+const initDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const saveSubjectsToIDB = async (subjectsData: Subject[]): Promise<void> => {
+  try {
+    const db = await initDB();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+
+    // Strip out non-cloneable properties (like React component references) before saving
+    const cleanSubjects = subjectsData.map((sub) => {
+      const { icon, ...rest } = sub as any;
+      return {
+        ...rest,
+        iconName: sub.iconName || "book",
+      };
+    });
+
+    store.put(cleanSubjects, "subjects");
+    store.put(true, "initialized");
+  } catch (err) {
+    console.error("IndexedDB save error:", err);
+  }
+};
+
+const loadSubjectsFromIDB = async (): Promise<{
+  initialized: boolean;
+  subjects: Subject[] | null;
+}> => {
+  try {
+    const db = await initDB();
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+
+    const initReq = store.get("initialized");
+    const subjReq = store.get("subjects");
+
+    return new Promise((resolve) => {
+      tx.oncomplete = () => {
+        resolve({
+          initialized: !!initReq.result,
+          subjects: subjReq.result || null,
+        });
+      };
+      tx.onerror = () => {
+        resolve({ initialized: false, subjects: null });
+      };
+    });
+  } catch {
+    return { initialized: false, subjects: null };
+  }
+};
+
+// Simple Markdown Parser for StudyNode Document
 function parseStudyMarkdown(source: string): {
   subjectTitle: string;
   topics: ParsedTopic[];
 } {
+  // Strip ```markdown / ``` code fence wrappers if present
+  let sanitized = source
+    .replace(/^```[a-zA-Z]*\n?/gm, "")
+    .replace(/```\s*$/gm, "");
   // Clean backslash escape sequences commonly outputted by LLMs (e.g. \- \[x\] -> - [x])
-  const cleanedSource = source.replace(/\\([#\[\]\-_*])/g, "$1");
-  const lines = cleanedSource.replace(/\r\n?/g, "\n").split("\n");
+  const cleanedSource = sanitized.replace(/\\([#\[\]\-_*])/g, "$1");
+
+  // Pre-pass to extract subject title from frontmatter or top declaration (e.g., subject: html or subject: "html")
   let subjectTitle = "Imported Subject";
+  const subjectMatch = cleanedSource.match(
+    /(?:^|\n)(?:---\s*\n|##\s*)?subject\s*:\s*(.+?)(?:\r?\n|---|$)/i,
+  );
+  if (subjectMatch && subjectMatch[1]) {
+    const rawSubject = subjectMatch[1].trim().replace(/^['"]|['"]$/g, "");
+    if (rawSubject) {
+      // Capitalize subject title cleanly (e.g. html -> HTML, node -> Node)
+      subjectTitle =
+        rawSubject.length <= 4
+          ? rawSubject.toUpperCase()
+          : rawSubject.charAt(0).toUpperCase() + rawSubject.slice(1);
+    }
+  }
+
+  const lines = cleanedSource.replace(/\r\n?/g, "\n").split("\n");
   let frontmatter = false;
 
   const topics: ParsedTopic[] = [];
@@ -405,7 +502,7 @@ function parseStudyMarkdown(source: string): {
       const optionMatch = trimmed.match(/^[-*]\s*\[([ xX])\]\s*(.*)$/);
       if (optionMatch) {
         currentItem.options.push({
-          id: "opt-" + Math.random().toString(36).substring(2, 9),
+          id: uid("opt"),
           text: optionMatch[2].trim(),
           correct: optionMatch[1].toLowerCase() === "x",
         });
@@ -491,6 +588,11 @@ const playSound = (
       osc.start(now);
       osc.stop(now + 0.05);
     }
+
+    // Automatically close AudioContext to prevent resource leaks
+    setTimeout(() => {
+      ctx.close().catch(() => {});
+    }, 2000);
   } catch {
     // Ignore audio context failures
   }
@@ -556,6 +658,17 @@ interface ModalProps {
 }
 
 const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }) => {
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   return (
@@ -636,31 +749,11 @@ export default function App(): ReactElement {
   >("subject");
   const [importSourceText, setImportSourceText] = useState<string>("");
   const [importTargetTopicId, setImportTargetTopicId] = useState<string>("");
-  const [importTargetTopicMode] = useState<"auto" | "existing" | "custom">(
-    "auto",
-  );
-
-  const [importCustomTopicTitle] = useState<string>("");
-
-  const [copiedPrompt, setCopiedPrompt] = useState<boolean>(false);
-
-  // Prompt Form States - Defaulting to Universal, General Non-Technical Subjects
-  const [promptSubject, setPromptSubject] = useState<string>("World Geography");
-  const [promptLevel, setPromptLevel] = useState<string>("Beginner");
-  const [promptTotalTopics, setPromptTotalTopics] = useState<number>(10);
-  const [promptTopicRange, setPromptTopicRange] = useState<string>("1-2");
-  const [promptMinQs, setPromptMinQs] = useState<number>(40);
-  const [promptMaxQs, setPromptMaxQs] = useState<number>(60);
-
-  const [topicPromptList, setTopicPromptList] = useState<string>(
-    "Oceans & Continents; World Capitals; Famous Landmarks",
-  );
-  const [topicPromptMinQs, setTopicPromptMinQs] = useState<number>(40);
-  const [topicPromptMaxQs, setTopicPromptMaxQs] = useState<number>(60);
-
-  // Form Fields State
-  const [newSubTitle, setNewSubTitle] = useState<string>("");
-  const [newSubDesc, setNewSubDesc] = useState<string>("");
+  const [importTargetTopicMode, setImportTargetTopicMode] = useState<
+    "auto" | "existing" | "custom"
+  >("auto");
+  const [importCustomTopicTitle, setImportCustomTopicTitle] =
+    useState<string>("");
 
   const [topicTitleInput, setTopicTitleInput] = useState<string>("");
   const [topicDescInput, setTopicDescInput] = useState<string>("");
@@ -677,47 +770,67 @@ export default function App(): ReactElement {
   const [rangeStartOrder, setRangeStartOrder] = useState<number>(1);
   const [rangeEndOrder, setRangeEndOrder] = useState<number>(1);
   const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([]);
-const [customTimerInput] = useState<string>("45");
   const [useCustomTimer, setUseCustomTimer] = useState<boolean>(false);
+  const [customTimerInput, setCustomTimerInput] = useState<string>("45");
+
   const [autoAdvanceEnabled, setAutoAdvanceEnabled] = useState<boolean>(false); // Disabled by default
 
-  // Initial Subjects Setup
-  const [subjects, setSubjects] = useState<Subject[]>([
+  // Subject Form State
+  const [newSubTitle, setNewSubTitle] = useState<string>("");
+  const [newSubDesc, setNewSubDesc] = useState<string>("");
+
+  // Prompt Generator Generator State & Copy Feedback
+  const [copiedPrompt, setCopiedPrompt] = useState<boolean>(false);
+  const [promptSubject, setPromptSubject] = useState<string>("World Geography");
+  const [promptLevel, setPromptLevel] = useState<string>("Beginner");
+  const [promptTotalTopics, setPromptTotalTopics] = useState<number>(10);
+  const [promptTopicRange, setPromptTopicRange] = useState<string>("1-2");
+  const [promptMinQs, setPromptMinQs] = useState<number>(40);
+  const [promptMaxQs, setPromptMaxQs] = useState<number>(60);
+
+  const [topicPromptList, setTopicPromptList] = useState<string>(
+    "Oceans & Continents; World Capitals",
+  );
+  const [topicPromptMinQs, setTopicPromptMinQs] = useState<number>(40);
+  const [topicPromptMaxQs, setTopicPromptMaxQs] = useState<number>(60);
+
+  // Initial Default Subjects
+  const defaultSubjects: Subject[] = [
     {
-      id: "sub-1",
+      id: uid("sub"),
       title: "World Geography & Continents",
       description:
         "Explore world capitals, oceans, major rivers, and continental landmarks.",
       color: "var(--lime)",
-      icon: BookOpen,
+      iconName: "book",
       topics: [
         {
-          id: "top-1",
+          id: uid("top"),
           order: 1,
           title: "Oceans & Continents Basics",
           description: "Fundamental facts about Earth’s geography.",
           items: [
             {
-              id: "item-1",
+              id: uid("item"),
               prompt: "Which is the largest ocean on Planet Earth?",
               options: [
-                { id: "opt-1", text: "Pacific Ocean", correct: true },
-                { id: "opt-2", text: "Atlantic Ocean", correct: false },
-                { id: "opt-3", text: "Indian Ocean", correct: false },
-                { id: "opt-4", text: "Arctic Ocean", correct: false },
+                { id: uid("opt"), text: "Pacific Ocean", correct: true },
+                { id: uid("opt"), text: "Atlantic Ocean", correct: false },
+                { id: uid("opt"), text: "Indian Ocean", correct: false },
+                { id: uid("opt"), text: "Arctic Ocean", correct: false },
               ],
               explanation:
                 "The Pacific Ocean covers over 30% of the Earth’s surface, making it the largest ocean.",
             },
             {
-              id: "item-2",
+              id: uid("item"),
               prompt:
                 "Which continent has the largest population in the world?",
               options: [
-                { id: "opt-21", text: "Europe", correct: false },
-                { id: "opt-22", text: "Asia", correct: true },
-                { id: "opt-23", text: "Africa", correct: false },
-                { id: "opt-24", text: "North America", correct: false },
+                { id: uid("opt"), text: "Europe", correct: false },
+                { id: uid("opt"), text: "Asia", correct: true },
+                { id: uid("opt"), text: "Africa", correct: false },
+                { id: uid("opt"), text: "North America", correct: false },
               ],
               explanation:
                 "Asia is home to around 60% of the total human population.",
@@ -725,19 +838,19 @@ const [customTimerInput] = useState<string>("45");
           ],
         },
         {
-          id: "top-2",
+          id: uid("top"),
           order: 2,
           title: "World Capitals",
           description: "Famous capital cities across the globe.",
           items: [
             {
-              id: "item-3",
+              id: uid("item"),
               prompt: "What is the capital city of France?",
               options: [
-                { id: "opt-31", text: "Rome", correct: false },
-                { id: "opt-32", text: "Paris", correct: true },
-                { id: "opt-33", text: "Madrid", correct: false },
-                { id: "opt-34", text: "Berlin", correct: false },
+                { id: uid("opt"), text: "Rome", correct: false },
+                { id: uid("opt"), text: "Paris", correct: true },
+                { id: uid("opt"), text: "Madrid", correct: false },
+                { id: uid("opt"), text: "Berlin", correct: false },
               ],
               explanation:
                 "Paris is the capital and most populous city of France.",
@@ -747,27 +860,27 @@ const [customTimerInput] = useState<string>("45");
       ],
     },
     {
-      id: "sub-2",
+      id: uid("sub"),
       title: "General Science & Planet Earth",
       description:
         "Solar system, nature, atmospheric layers, and basic physics.",
       color: "var(--yellow)",
-      icon: Terminal,
+      iconName: "terminal",
       topics: [
         {
-          id: "top-3",
+          id: uid("top"),
           order: 1,
           title: "Solar System Fundamentals",
           description: "Planets and celestial bodies.",
           items: [
             {
-              id: "item-4",
+              id: uid("item"),
               prompt: 'Which planet is known as the "Red Planet"?',
               options: [
-                { id: "opt-41", text: "Venus", correct: false },
-                { id: "opt-42", text: "Mars", correct: true },
-                { id: "opt-43", text: "Jupiter", correct: false },
-                { id: "opt-44", text: "Saturn", correct: false },
+                { id: uid("opt"), text: "Venus", correct: false },
+                { id: uid("opt"), text: "Mars", correct: true },
+                { id: uid("opt"), text: "Jupiter", correct: false },
+                { id: uid("opt"), text: "Saturn", correct: false },
               ],
               explanation:
                 "Mars gets its reddish color from iron oxide (rust) on its surface.",
@@ -776,30 +889,218 @@ const [customTimerInput] = useState<string>("45");
         },
       ],
     },
-  ]);
+  ];
+
+  const [subjects, setSubjects] = useState<Subject[]>(defaultSubjects);
+  const [isLoadedFromIDB, setIsLoadedFromIDB] = useState<boolean>(false);
+
+  // Load from IndexedDB on initial mount
+  useEffect(() => {
+    loadSubjectsFromIDB().then(({ initialized, subjects: storedSubjects }) => {
+      if (initialized && storedSubjects !== null) {
+        setSubjects(storedSubjects);
+      } else {
+        // First visit: save initial defaults to IDB
+        saveSubjectsToIDB(defaultSubjects);
+      }
+      setIsLoadedFromIDB(true);
+    });
+  }, []);
+
+  // Sync state changes to IndexedDB after initial load
+  useEffect(() => {
+    if (isLoadedFromIDB) {
+      saveSubjectsToIDB(subjects);
+    }
+  }, [subjects, isLoadedFromIDB]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  const toggleTheme = (): void =>
+  // Helper function to renumber topics cleanly
+  const renumberTopics = (topicList: Topic[]): Topic[] => {
+    return topicList.map((t, idx) => ({ ...t, order: idx + 1 }));
+  };
+
+  // Toggle Theme Handler
+  const toggleTheme = (): void => {
     setTheme((prev) => (prev === "light" ? "dark" : "light"));
-  const activeSubject = subjects.find((s: Subject) => s.id === activeSubjectId);
-
-  const renumberTopics = (topicsList: Topic[]): Topic[] => {
-    return topicsList.map((t: Topic, index: number) => ({
-      ...t,
-      order: index + 1,
-    }));
   };
 
-  const toggleTopicAccordion = (topicId: string): void => {
-    setExpandedTopics((prev: Record<string, boolean>) => ({
-      ...prev,
-      [topicId]: !prev[topicId],
-    }));
+  // Currently Active Subject
+  const activeSubject = subjects.find((s) => s.id === activeSubjectId) || null;
+
+  // Prompt Generator Functions (Strict Verbatim StudyNode MD Rules)
+  const getSubjectPromptText = (): string => {
+    return `You are an expert teacher and exam-question writer. Create a study document in the StudyNode Markdown format for a whole SUBJECT.
+
+=== USER INPUT (edit only these lines) ===
+SUBJECT: [${promptSubject}]
+LEVEL: [${promptLevel}]                      (Beginner / Intermediate / Advanced)
+TOTAL_TOPICS: [${promptTotalTopics}]                     (Total topics to divide the subject into)
+TOPIC_RANGE_TO_GENERATE: [${promptTopicRange}]         (e.g., 1-2, 3-4, or ALL)
+MIN_QUESTIONS_PER_TOPIC: [${promptMinQs}]
+MAX_QUESTIONS_PER_TOPIC: [${promptMaxQs}]
+===========================================
+
+RAW .MD OUTPUT (highest priority, overrides everything else)
+- Your answer must be the contents of a plain-text .md file and nothing else.
+- Output the document inside ONE single fenced code block labeled markdown.
+- The first line inside the block must be "---" and the last line must be the final explanation line.
+- Write raw Markdown characters exactly as they are with NO backslashes before any character: no \\#, no \\[, no \\], no \\-, no \\_, no \\*.
+- Do NOT use bold, italics, emojis, tables, HTML, horizontal rules, numbered lists, or any decoration anywhere in the file.
+- Use only plain straight quotes (" and '), never curly quotes.
+- Options must stay exactly as "- [x] text" (correct) and "- [ ] text" (wrong) with a space after the dash and inside brackets.
+
+STEP 1: PLAN THE TOPICS
+- Automatically divide SUBJECT into exactly TOTAL_TOPICS topics suited to LEVEL.
+- Order them logically from foundational concepts to advanced topics.
+
+STEP 2: WRITE ONLY THE REQUESTED TOPIC RANGE
+- Generate ONLY the topics specified in TOPIC_RANGE_TO_GENERATE (e.g., "# 1." and "# 2.").
+
+QUANTITY RULES
+- Each generated topic gets between MIN_QUESTIONS_PER_TOPIC and MAX_QUESTIONS_PER_TOPIC MCQs.
+
+FORMAT RULES (follow exactly)
+1. Start file with frontmatter:
+
+---
+studynode: 1
+subject: ${promptSubject.toLowerCase().replace(/\s+/g, "-")}
+---
+
+2. Heading per topic: "# <number>. <Topic Title>"
+3. Each question starts with: "## Q: <question prompt>"
+4. Directly under it, one per line:
+   type: mcq
+   difficulty: easy|medium|hard
+   tags: tag1, tag2
+5. Then EXACTLY 4 options, one per line:
+   - [x] correct option
+   - [ ] wrong option 1
+   - [ ] wrong option 2
+   - [ ] wrong option 3
+6. End each question with one line:
+   explain: <1 to 3 sentences explaining the correct answer>
+7. Leave one blank line between questions.`;
   };
 
+  const getTopicPromptText = (): string => {
+    return `You are an expert teacher and exam-question writer. Create a study document in the StudyNode Markdown format for specific target topics.
+
+=== USER INPUT (edit only these lines) ===
+TOPICS: [${topicPromptList}]   (separated by semicolons)
+MIN_QUESTIONS: [${topicPromptMinQs}]                     (minimum MCQs for EACH topic)
+MAX_QUESTIONS: [${topicPromptMaxQs}]                     (maximum MCQs for EACH topic)
+=============================================
+
+RAW .MD OUTPUT (highest priority, overrides everything else)
+- Your answer must be the contents of a plain-text .md file and nothing else.
+- Output the document inside ONE single fenced code block labeled markdown.
+- The first line inside the block must be "---" and the last line must be the final explanation line.
+- Write raw Markdown characters with NO backslashes before any character (no \\#, no \\[, no \\], no \\-).
+- Do NOT use bold, italics, emojis, tables, HTML, horizontal rules, numbered lists, or any decoration anywhere.
+- Use only plain straight quotes (" and '), never curly quotes.
+- Options must stay exactly as "- [x] text" and "- [ ] text".
+
+TOPIC STRUCTURE RULES
+- Split TOPICS at each semicolon. Each part is one topic.
+- Write one heading per topic in sequential order: "# 1.", "# 2.", "# 3.", and so on.
+
+QUANTITY RULES
+- EACH topic gets between MIN_QUESTIONS and MAX_QUESTIONS MCQs.
+
+FORMAT RULES (follow exactly)
+1. Start the file with this frontmatter:
+
+---
+studynode: 1
+---
+
+2. Each topic heading on its own line: "# <number>. <Topic Title>"
+3. Each question starts with "## Q: <question prompt>".
+4. Directly under it, one per line:
+   type: mcq
+   difficulty: easy|medium|hard
+   tags: tag1, tag2
+5. Then exactly 4 options, one per line:
+   - [x] correct option
+   - [ ] wrong option
+6. End each question with one line:
+   explain: <1 to 3 sentences explaining the correct answer>
+7. Leave one blank line between questions and before each topic heading.`;
+  };
+
+  const handleCopyPrompt = (text: string): void => {
+    navigator.clipboard.writeText(text);
+    setCopiedPrompt(true);
+    setTimeout(() => setCopiedPrompt(false), 2000);
+  };
+
+  // Export Handlers
+  const handleExportPlatformBackup = (): void => {
+    const backupData = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      subjects,
+    };
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `studynode-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportSubjectJSON = (): void => {
+    if (!activeSubject) return;
+    const blob = new Blob([JSON.stringify(activeSubject, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${activeSubject.title.toLowerCase().replace(/\s+/g, "-")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportSubjectMarkdown = (): void => {
+    if (!activeSubject) return;
+    let md = `---\nstudynode: 1\nsubject: ${activeSubject.title.toLowerCase().replace(/\s+/g, "-")}\n---\n\n`;
+
+    activeSubject.topics.forEach((t) => {
+      md += `# ${t.order}. ${t.title}\n\n`;
+      t.items.forEach((it) => {
+        md += `## Q: ${it.prompt}\n`;
+        md += `type: mcq\n`;
+        md += `difficulty: medium\n`;
+        md += `tags: ${t.title.toLowerCase().replace(/\s+/g, "-")}\n`;
+        it.options.forEach((opt) => {
+          md += `- [${opt.correct ? "x" : " "}] ${opt.text}\n`;
+        });
+        if (it.explanation) {
+          md += `explain: ${it.explanation}\n`;
+        }
+        md += `\n`;
+      });
+    });
+
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${activeSubject.title.toLowerCase().replace(/\s+/g, "-")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Subject CRUD Handlers
   const handleOpenAddSubject = (): void => {
     setEditingSubject(null);
     setNewSubTitle("");
@@ -807,11 +1108,11 @@ const [customTimerInput] = useState<string>("45");
     setIsAddSubjectOpen(true);
   };
 
-  const handleOpenEditSubject = (subject: Subject, e?: MouseEvent): void => {
-    if (e) e.stopPropagation();
-    setEditingSubject(subject);
-    setNewSubTitle(subject.title);
-    setNewSubDesc(subject.description || "");
+  const handleOpenEditSubject = (sub: Subject, e: MouseEvent): void => {
+    e.stopPropagation();
+    setEditingSubject(sub);
+    setNewSubTitle(sub.title);
+    setNewSubDesc(sub.description);
     setIsAddSubjectOpen(true);
   };
 
@@ -820,8 +1121,8 @@ const [customTimerInput] = useState<string>("45");
     if (!newSubTitle.trim()) return;
 
     if (editingSubject) {
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
+      setSubjects((prev) =>
+        prev.map((s) =>
           s.id === editingSubject.id
             ? {
                 ...s,
@@ -838,47 +1139,36 @@ const [customTimerInput] = useState<string>("45");
         "var(--periwinkle)",
         "var(--slate)",
       ];
-      const newSubject: Subject = {
-        id: "sub-" + Date.now(),
+      const newSub: Subject = {
+        id: uid("sub"),
         title: newSubTitle.trim(),
-        description: newSubDesc.trim() || "No description provided.",
+        description: newSubDesc.trim(),
         color: colors[subjects.length % colors.length],
-        icon: BookOpen,
+        iconName: "book",
         topics: [],
       };
-      setSubjects((prev: Subject[]) => [...prev, newSubject]);
+      setSubjects((prev) => [...prev, newSub]);
     }
 
-    setNewSubTitle("");
-    setNewSubDesc("");
-    setEditingSubject(null);
     setIsAddSubjectOpen(false);
   };
 
-  const handleDeleteSubject = (subjectId: string, e?: MouseEvent): void => {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    const targetSubject = subjects.find((s: Subject) => s.id === subjectId);
-    if (!targetSubject) return;
-
+  const handleDeleteSubject = (subId: string, e: MouseEvent): void => {
+    e.stopPropagation();
     if (
-      window.confirm(
-        `Are you sure you want to delete "${targetSubject.title}" and all its topics/questions?`,
+      confirm(
+        "Are you sure you want to delete this subject and all its topics?",
       )
     ) {
-      setSubjects((prev: Subject[]) => {
-        const next = prev.filter((s: Subject) => s.id !== subjectId);
-        return [...next];
-      });
-      if (activeSubjectId === subjectId) {
+      setSubjects((prev) => prev.filter((s) => s.id !== subId));
+      if (activeSubjectId === subId) {
         setActiveSubjectId(null);
         setCurrentView("home");
       }
     }
   };
 
+  // Topic CRUD Handlers
   const handleOpenAddTopic = (): void => {
     setEditingTopic(null);
     setTopicTitleInput("");
@@ -898,8 +1188,9 @@ const [customTimerInput] = useState<string>("45");
     e.preventDefault();
     if (!activeSubject || !topicTitleInput.trim()) return;
 
+    let updatedTopics: Topic[] = [];
     if (editingTopic) {
-      const updatedTopics = activeSubject.topics.map((t: Topic) =>
+      updatedTopics = activeSubject.topics.map((t) =>
         t.id === editingTopic.id
           ? {
               ...t,
@@ -908,53 +1199,39 @@ const [customTimerInput] = useState<string>("45");
             }
           : t,
       );
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
-          s.id === activeSubject.id ? { ...s, topics: updatedTopics } : s,
-        ),
-      );
     } else {
-      const newTopic: Topic = {
-        id: "top-" + Date.now(),
+      const newTop: Topic = {
+        id: uid("top"),
         order: activeSubject.topics.length + 1,
         title: topicTitleInput.trim(),
         description: topicDescInput.trim(),
         items: [],
       };
-      const updatedTopics = renumberTopics([...activeSubject.topics, newTopic]);
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
-          s.id === activeSubject.id ? { ...s, topics: updatedTopics } : s,
-        ),
-      );
-      setExpandedTopics((prev: Record<string, boolean>) => ({
-        ...prev,
-        [newTopic.id]: true,
-      }));
+      updatedTopics = [...activeSubject.topics, newTop];
     }
 
+    const renumbered = renumberTopics(updatedTopics);
+    setSubjects((prev) =>
+      prev.map((s) =>
+        s.id === activeSubject.id ? { ...s, topics: renumbered } : s,
+      ),
+    );
     setIsAddTopicOpen(false);
-    setEditingTopic(null);
   };
 
-  const handleDeleteTopic = (topicId: string, e?: MouseEvent): void => {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+  const handleDeleteTopic = (topicId: string, e: MouseEvent): void => {
+    e.stopPropagation();
     if (!activeSubject) return;
     if (
-      window.confirm(
+      confirm(
         "Are you sure you want to delete this topic and all its questions?",
       )
     ) {
-      const filtered = activeSubject.topics.filter(
-        (t: Topic) => t.id !== topicId,
-      );
+      const filtered = activeSubject.topics.filter((t) => t.id !== topicId);
       const renumbered = renumberTopics(filtered);
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
-          s.id === activeSubject.id ? { ...s, topics: [...renumbered] } : s,
+      setSubjects((prev) =>
+        prev.map((s) =>
+          s.id === activeSubject.id ? { ...s, topics: renumbered } : s,
         ),
       );
     }
@@ -963,31 +1240,36 @@ const [customTimerInput] = useState<string>("45");
   const handleMoveTopic = (
     topicId: string,
     direction: "up" | "down",
-    e?: MouseEvent,
+    e: MouseEvent,
   ): void => {
-    if (e) e.stopPropagation();
+    e.stopPropagation();
     if (!activeSubject) return;
-    const topics = [...activeSubject.topics];
-    const index = topics.findIndex((t: Topic) => t.id === topicId);
+    const index = activeSubject.topics.findIndex((t) => t.id === topicId);
     if (index === -1) return;
 
-    const targetIndex = direction === "up" ? index - 1 : index + 1;
-    if (targetIndex < 0 || targetIndex >= topics.length) return;
+    const newTopics = [...activeSubject.topics];
+    const targetIdx = direction === "up" ? index - 1 : index + 1;
+    if (targetIdx < 0 || targetIdx >= newTopics.length) return;
 
-    const temp = topics[index];
-    topics[index] = topics[targetIndex];
-    topics[targetIndex] = temp;
+    const temp = newTopics[index];
+    newTopics[index] = newTopics[targetIdx];
+    newTopics[targetIdx] = temp;
 
-    const renumbered = renumberTopics(topics);
-    setSubjects((prev: Subject[]) =>
-      prev.map((s: Subject) =>
+    const renumbered = renumberTopics(newTopics);
+    setSubjects((prev) =>
+      prev.map((s) =>
         s.id === activeSubject.id ? { ...s, topics: renumbered } : s,
       ),
     );
   };
 
-  const handleOpenAddItem = (topic: Topic, e?: MouseEvent): void => {
-    if (e) e.stopPropagation();
+  const toggleTopicAccordion = (topicId: string): void => {
+    setExpandedTopics((prev) => ({ ...prev, [topicId]: !prev[topicId] }));
+  };
+
+  // Question CRUD Handlers
+  const handleOpenAddItem = (topic: Topic, e: MouseEvent): void => {
+    e.stopPropagation();
     setActiveTopicForNewItem(topic);
     setEditingItem(null);
     setNewItemPrompt("");
@@ -1000,15 +1282,15 @@ const [customTimerInput] = useState<string>("45");
   const handleOpenEditItem = (
     topic: Topic,
     item: Item,
-    e?: MouseEvent,
+    e: MouseEvent,
   ): void => {
-    if (e) e.stopPropagation();
+    e.stopPropagation();
     setActiveTopicForNewItem(topic);
     setEditingItem(item);
     setNewItemPrompt(item.prompt);
-    setNewItemOpts(item.options.map((o: ItemOption) => o.text));
-    const correctIndex = item.options.findIndex((o: ItemOption) => o.correct);
-    setNewItemCorrectIdx(correctIndex >= 0 ? correctIndex : 0);
+    setNewItemOpts(item.options.map((o) => o.text));
+    const correctIdx = item.options.findIndex((o) => o.correct);
+    setNewItemCorrectIdx(correctIdx >= 0 ? correctIdx : 0);
     setNewItemExp(item.explanation || "");
     setIsAddItemOpen(true);
   };
@@ -1018,23 +1300,22 @@ const [customTimerInput] = useState<string>("45");
     if (!activeSubject || !activeTopicForNewItem || !newItemPrompt.trim())
       return;
 
-    const options: ItemOption[] = newItemOpts.map(
-      (optText: string, idx: number) => ({
-        id: "opt-" + Date.now() + "-" + idx,
-        text: optText.trim() || `Option ${String.fromCharCode(65 + idx)}`,
-        correct: idx === newItemCorrectIdx,
-      }),
-    );
+    const formattedOpts: ItemOption[] = newItemOpts.map((optText, idx) => ({
+      id: uid("opt"),
+      text: optText.trim() || `Option ${String.fromCharCode(65 + idx)}`,
+      correct: idx === newItemCorrectIdx,
+    }));
 
+    let updatedTopics: Topic[] = [];
     if (editingItem) {
-      const updatedTopics = activeSubject.topics.map((t: Topic) => {
+      updatedTopics = activeSubject.topics.map((t) => {
         if (t.id === activeTopicForNewItem.id) {
-          const updatedItems = t.items.map((it: Item) =>
+          const updatedItems = t.items.map((it) =>
             it.id === editingItem.id
               ? {
                   ...it,
                   prompt: newItemPrompt.trim(),
-                  options,
+                  options: formattedOpts,
                   explanation: newItemExp.trim(),
                 }
               : it,
@@ -1043,87 +1324,61 @@ const [customTimerInput] = useState<string>("45");
         }
         return t;
       });
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
-          s.id === activeSubject.id ? { ...s, topics: updatedTopics } : s,
-        ),
-      );
     } else {
       const newItem: Item = {
-        id: "item-" + Date.now(),
+        id: uid("item"),
         prompt: newItemPrompt.trim(),
-        options,
+        options: formattedOpts,
         explanation: newItemExp.trim(),
       };
-      const updatedTopics = activeSubject.topics.map((t: Topic) =>
-        t.id === activeTopicForNewItem.id
-          ? { ...t, items: [...t.items, newItem] }
-          : t,
-      );
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
-          s.id === activeSubject.id ? { ...s, topics: updatedTopics } : s,
-        ),
-      );
+      updatedTopics = activeSubject.topics.map((t) => {
+        if (t.id === activeTopicForNewItem.id) {
+          return { ...t, items: [...t.items, newItem] };
+        }
+        return t;
+      });
     }
 
+    setSubjects((prev) =>
+      prev.map((s) =>
+        s.id === activeSubject.id ? { ...s, topics: updatedTopics } : s,
+      ),
+    );
     setIsAddItemOpen(false);
-    setEditingItem(null);
   };
 
   const handleDeleteItem = (
     topicId: string,
     itemId: string,
-    e?: MouseEvent,
+    e: MouseEvent,
   ): void => {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+    e.stopPropagation();
     if (!activeSubject) return;
-    if (window.confirm("Delete this question?")) {
-      const updatedTopics = activeSubject.topics.map((t: Topic) => {
+    if (confirm("Are you sure you want to delete this question?")) {
+      const updatedTopics = activeSubject.topics.map((t) => {
         if (t.id === topicId) {
-          return {
-            ...t,
-            items: t.items.filter((it: Item) => it.id !== itemId),
-          };
+          return { ...t, items: t.items.filter((it) => it.id !== itemId) };
         }
         return t;
       });
-      setSubjects((prev: Subject[]) =>
-        prev.map((s: Subject) =>
-          s.id === activeSubject.id ? { ...s, topics: [...updatedTopics] } : s,
+      setSubjects((prev) =>
+        prev.map((s) =>
+          s.id === activeSubject.id ? { ...s, topics: updatedTopics } : s,
         ),
       );
     }
   };
 
-  // --- Quiz Launchers ---
-  // Topic listing quick quiz: NO timer applied
-  const handleStartTopicQuiz = (topic: Topic, e?: MouseEvent): void => {
-    if (e) e.stopPropagation();
-    if (topic.items.length === 0) {
-      alert(`Topic ${topic.order} has no questions to quiz on yet!`);
-      return;
-    }
-    setQuizTitle(`Topic ${topic.order}: ${topic.title}`);
-    setQuizQuestions([...topic.items].sort(() => Math.random() - 0.5));
-    setQuizTimerSeconds(0); // 0 means Timer Off for topic listing quick quiz
-    setCurrentView("quiz");
-  };
-
+  // Quiz Launcher Handlers
   const handleOpenQuizBuilder = (): void => {
     if (!activeSubject) return;
-    setSelectedTopicIds(activeSubject.topics.map((t: Topic) => t.id));
-    if (activeSubject.topics.length > 0) {
-      setRangeStartOrder(1);
-      setRangeEndOrder(activeSubject.topics.length);
-    }
+    setQuizScopeMode("all");
+    setRangeStartOrder(1);
+    setRangeEndOrder(activeSubject.topics.length || 1);
+    setSelectedTopicIds(activeSubject.topics.map((t) => t.id));
     setIsQuizBuilderOpen(true);
   };
 
-  // Main custom quiz: timer applies based on user selection
   const handleStartCustomQuiz = (): void => {
     if (!activeSubject) return;
     let targetTopics: Topic[] = [];
@@ -1131,228 +1386,41 @@ const [customTimerInput] = useState<string>("45");
     if (quizScopeMode === "all") {
       targetTopics = activeSubject.topics;
     } else if (quizScopeMode === "range") {
-      const minO = Math.min(rangeStartOrder, rangeEndOrder);
-      const maxO = Math.max(rangeStartOrder, rangeEndOrder);
       targetTopics = activeSubject.topics.filter(
-        (t: Topic) => t.order >= minO && t.order <= maxO,
+        (t) => t.order >= rangeStartOrder && t.order <= rangeEndOrder,
       );
     } else if (quizScopeMode === "specific") {
-      targetTopics = activeSubject.topics.filter((t: Topic) =>
+      targetTopics = activeSubject.topics.filter((t) =>
         selectedTopicIds.includes(t.id),
       );
     }
 
-    const allQuestions = targetTopics.flatMap((t: Topic) => t.items);
-    if (allQuestions.length === 0) {
-      alert("No questions found in the selected topic scope!");
+    const allQs = targetTopics.flatMap((t) => t.items);
+    if (allQs.length === 0) {
+      alert("No questions found in selected topics!");
       return;
     }
 
-    const finalTimer = useCustomTimer
-      ? Math.max(5, parseInt(customTimerInput, 10) || 30)
+    const finalTimerVal = useCustomTimer
+      ? parseInt(customTimerInput, 10) || 0
       : quizTimerSeconds;
 
-    setQuizTitle(`Custom Quiz: ${activeSubject.title}`);
-    setQuizQuestions([...allQuestions].sort(() => Math.random() - 0.5));
-    setQuizTimerSeconds(finalTimer);
+    setQuizTitle(`${activeSubject.title} (Custom Quiz)`);
+    setQuizQuestions(allQs);
+    setQuizTimerSeconds(finalTimerVal);
     setIsQuizBuilderOpen(false);
     setCurrentView("quiz");
   };
 
-  // Export & Import handlers
-  const handleExportPlatformBackup = (): void => {
-    const backupData = {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      subjects,
-    };
-    const jsonStr = JSON.stringify(backupData, null, 2);
-    const blob = new Blob([jsonStr], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `studynode_platform_backup_${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleExportSubjectJSON = (): void => {
-    if (!activeSubject) return;
-    const jsonStr = JSON.stringify(activeSubject, null, 2);
-    const blob = new Blob([jsonStr], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${activeSubject.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.studynode.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleExportSubjectMarkdown = (): void => {
-    if (!activeSubject) return;
-    let md = `---\nstudynode: 1\nsubject: ${activeSubject.title}\n---\n\n`;
-    activeSubject.topics.forEach((t: Topic) => {
-      md += `# ${t.order}. ${t.title}\n\n`;
-      t.items.forEach((it: Item) => {
-        md += `## Q: ${it.prompt}\ntype: mcq\ndifficulty: medium\ntags: general\n`;
-        it.options.forEach((opt: ItemOption) => {
-          md += `- [${opt.correct ? "x" : " "}] ${opt.text}\n`;
-        });
-        if (it.explanation) {
-          md += `explain: ${it.explanation}\n`;
-        }
-        md += `\n`;
-      });
-    });
-
-    const blob = new Blob([md], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${activeSubject.title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const getSubjectPromptText = (): string => {
-    const slug = promptSubject.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    return `You are an expert teacher and exam-question writer. Create a study document in the StudyNode Markdown format for a whole SUBJECT.
-
-=== USER INPUT (edit only these lines) ===
-SUBJECT: [${promptSubject}]
-LEVEL: [${promptLevel}]                      (Beginner / Intermediate / Advanced)
-TOTAL_TOPICS: [${promptTotalTopics}]                     (Total topics to divide the subject into)
-TOPIC_RANGE_TO_GENERATE: [${promptTopicRange}]         (e.g., 1-2, 3-4, or ALL)
-MIN_QUESTIONS_PER_TOPIC: [${promptMinQs}]
-MAX_QUESTIONS_PER_TOPIC: [${promptMaxQs}]
-===========================================
-
-RAW .MD OUTPUT (highest priority, overrides everything else)
-- Your answer must be the contents of a plain-text .md file and nothing else.
-- If you can create or attach files, create a file named ${slug || "subject"}.md and give it for download, with no other text.
-- If you cannot create files, output the document inside ONE single fenced code block labeled markdown, so nothing gets rendered. The first line inside the block must be the opening "---" of the frontmatter, and the last line inside the block must be the final line of the last question.
-- Write raw Markdown characters exactly as they are. NEVER put a backslash before any character: no backslashes before dashes, brackets, numbers, or hash symbols.
-- Do NOT use bold, italics, emojis, tables, HTML, horizontal rules, numbered lists, or any decoration anywhere in the file.
-- Use only plain straight quotes (" and '), never curly quotes.
-- Options MUST stay exactly as "- [x] text" (for correct) and "- [ ] text" (for incorrect). Always include a space after the dash and inside brackets.
-- Do not write any text before or after the file or code block: no greeting, no explanation, no "here is your file", no notes.
-
-STEP 1: PLAN THE TOPICS (do this silently, do not print the plan)
-- Automatically divide SUBJECT into exactly TOTAL_TOPICS topics suited to LEVEL.
-- Order them logically like a real course: foundations first, with each topic building on previous ones.
-- Topics must not overlap. Together they must cover everything essential for this LEVEL with zero gaps.
-
-STEP 2: WRITE ONLY THE REQUESTED TOPIC RANGE
-- Look at TOPIC_RANGE_TO_GENERATE. Write ONLY the topics specified in that range (e.g., if range is "1-2", generate only "# 1." and "# 2.").
-- Number headings accurately matching their absolute topic index: "# <Topic Number>. <Topic Title>".
-
-QUANTITY RULES
-- Each generated topic gets between MIN_QUESTIONS_PER_TOPIC and MAX_QUESTIONS_PER_TOPIC MCQs (inclusive). Never go below the minimum or above the maximum.
-
-CONTENT RULES
-- Questions in a topic must cover ONLY that topic.
-- Cover every core concept, term, rule, and pitfall needed for this LEVEL.
-- Order questions inside a topic from foundational to advanced.
-- Difficulty distribution: roughly 40% easy, 40% medium, 20% hard.
-- Do not repeat an idea within a topic or across topics.
-- Distractors must be believable plain text without backticks or Markdown code formatting.
-
-FORMAT RULES (follow exactly)
-1. Start the file with this frontmatter:
-
----
-studynode: 1
-subject: ${promptSubject}
----
-
-2. Each topic heading on its own line: "# <number>. <Topic Title>"
-3. Each question starts with "## Q: <question prompt>".
-4. Directly under it, one per line:
-   type: mcq
-   difficulty: easy|medium|hard
-   tags: tag1, tag2
-5. Then exactly 4 options, one per line:
-   - [x] correct option
-   - [ ] wrong option 1
-   - [ ] wrong option 2
-   - [ ] wrong option 3
-6. End each question with one line:
-   explain: <1 to 3 sentences on why the answer is correct and why common wrong choices are incorrect>
-7. Leave one blank line between questions and before each topic heading.
-
-FINAL CHECK (silently, before sending)
-- Output is strictly the single code block or download file with zero surrounding conversational text.
-- Absolutely NO backslashes (\\), no bold formatting (**), no emojis, or curly quotes anywhere.
-- Every question has exactly 4 options, exactly one [x], and all required fields.`;
-  };
-
-  const getTopicPromptText = (): string => {
-    return `You are an expert teacher and exam-question writer. Create a study document in the StudyNode Markdown format for specific target topics.
-
-=== USER INPUT (edit only these lines) ===
-TOPICS: [${topicPromptList}]   (separated by semicolons)
-MIN_QUESTIONS: [${topicPromptMinQs}]                     (minimum MCQs for EACH topic)
-MAX_QUESTIONS: [${topicPromptMaxQs}]                     (maximum MCQs for EACH topic)
-=============================================
-
-RAW .MD OUTPUT (highest priority, overrides everything else)
-- Your answer must be the contents of a plain-text .md file and nothing else.
-- If you can create or attach files, create a file named topics.md and give it for download, with no other text.
-- If you cannot create files, output the document inside ONE single fenced code block labeled markdown, so nothing gets rendered. The first line inside the block must be the opening "---" of the frontmatter, and the last line inside the block must be the final line of the last question.
-- Write raw Markdown characters exactly as they are. NEVER put a backslash before any character: no backslashes before dashes, brackets, numbers, or hash symbols.
-- Do NOT use bold, italics, emojis, tables, HTML, horizontal rules, numbered lists, or any decoration anywhere in the file.
-- Use only plain straight quotes (" and '), never curly quotes.
-- Options MUST stay exactly as "- [x] text" (for correct) and "- [ ] text" (for incorrect). Always include a space after the dash and inside brackets.
-- Do not write any text before or after the file or code block: no greeting, no explanation, no "here is your file", no notes.
-
-TOPIC STRUCTURE RULES
-- Split TOPICS at each semicolon. Each part is one topic.
-- Write one heading per topic in sequential order: "# 1.", "# 2.", "# 3.", and so on.
-- Clean and capitalize each title properly (e.g., "# 1. Oceans & Continents").
-- Nothing else in the file may start with a single "#".
-
-QUANTITY RULES
-- EACH topic gets between MIN_QUESTIONS and MAX_QUESTIONS MCQs (inclusive). Never go below the minimum or above the maximum.
-
-CONTENT RULES
-- Questions under a topic must cover ONLY that topic without overlap.
-- Cover all essential fundamentals, terms, and common traps.
-- Order questions from foundational to advanced.
-- Difficulty distribution: roughly 40% easy, 40% medium, 20% hard.
-- Distractors must be realistic. Write terms or concept names as plain text without backticks.
-
-FORMAT RULES (follow exactly)
-1. Start the file with this frontmatter:
-
----
-studynode: 1
----
-
-2. Each topic heading on its own line: "# <number>. <Topic Title>"
-3. Each question starts with "## Q: <question prompt>".
-4. Directly under it, one per line:
-   type: mcq
-   difficulty: easy|medium|hard
-   tags: tag1, tag2
-5. Then exactly 4 options, one per line:
-   - [x] correct option
-   - [ ] wrong option 1
-   - [ ] wrong option 2
-   - [ ] wrong option 3
-6. End each question with one line:
-   explain: <1 to 3 sentences explaining the correct answer and common pitfalls>
-7. Leave one blank line between questions and before each topic heading.
-
-FINAL CHECK (silently, before sending)
-- Output is strictly the file content or code block with zero surrounding text.
-- Absolutely NO backslashes (\\), no bold formatting (**), no emojis, or curly quotes anywhere.
-- Every question has exactly 4 options, exactly one [x], and all required fields.`;
-  };
-
-  const handleCopyPrompt = (text: string): void => {
-    void navigator.clipboard.writeText(text);
-    setCopiedPrompt(true);
-    setTimeout(() => setCopiedPrompt(false), 2000);
+  const handleStartTopicQuiz = (topic: Topic, e: MouseEvent): void => {
+    e.stopPropagation();
+    if (topic.items.length === 0) {
+      alert("This topic does not have any questions yet.");
+      return;
+    }
+    setQuizTitle(`Topic ${topic.order}: ${topic.title}`);
+    setQuizQuestions(topic.items);
+    setCurrentView("quiz");
   };
 
   const handleFileUpload = (e: ChangeEvent<HTMLInputElement>): void => {
@@ -1360,11 +1428,13 @@ FINAL CHECK (silently, before sending)
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event: ProgressEvent<FileReader>) => {
-      if (event.target?.result) {
-        setImportSourceText(event.target.result as string);
+      const content = event.target?.result as string;
+      if (content) {
+        setImportSourceText(content);
       }
     };
     reader.readAsText(file);
+    e.target.value = "";
   };
 
   const handleMusicUpload = (e: ChangeEvent<HTMLInputElement>): void => {
@@ -1383,10 +1453,12 @@ FINAL CHECK (silently, before sending)
             if (prev.length === 0 && updated.length === 1) {
               setCurrentTrackIndex(0);
               setIsMusicPlaying(true);
-              if (audioRef.current) {
-                audioRef.current.src = base64Url;
-                audioRef.current.play().catch(() => setIsMusicPlaying(false));
-              }
+              setTimeout(() => {
+                if (audioRef.current) {
+                  audioRef.current.src = base64Url;
+                  audioRef.current.play().catch(() => setIsMusicPlaying(false));
+                }
+              }, 0);
             }
             return updated;
           });
@@ -1394,77 +1466,73 @@ FINAL CHECK (silently, before sending)
       };
       reader.readAsDataURL(file);
     }
+    e.target.value = "";
   };
 
   const handleSelectTrack = (index: number): void => {
     setCurrentTrackIndex(index);
     setIsMusicPlaying(true);
-    if (audioRef.current && playlist[index]) {
-      audioRef.current.src = playlist[index].url;
-      audioRef.current.play().catch(() => setIsMusicPlaying(false));
+    if (playlist[index]) {
+      setTimeout(() => {
+        if (audioRef.current) {
+          audioRef.current.src = playlist[index].url;
+          audioRef.current.play().catch(() => setIsMusicPlaying(false));
+        }
+      }, 0);
     }
   };
 
   const handleDeleteTrack = (index: number, e: MouseEvent): void => {
     e.stopPropagation();
-    const updated = playlist.filter((_, idx) => idx !== index);
-    setPlaylist(updated);
-    if (updated.length === 0) {
-      if (audioRef.current) audioRef.current.pause();
-      setIsMusicPlaying(false);
-      setCurrentTrackIndex(0);
-    } else if (index === currentTrackIndex) {
-      const nextIdx = 0;
-      setCurrentTrackIndex(nextIdx);
-      if (audioRef.current) {
-        audioRef.current.src = updated[nextIdx].url;
-        if (isMusicPlaying) audioRef.current.play().catch(() => {});
+    setPlaylist((prev) => {
+      const updated = prev.filter((_, idx) => idx !== index);
+      if (updated.length === 0) {
+        setIsMusicPlaying(false);
+        if (audioRef.current) audioRef.current.pause();
+      } else if (currentTrackIndex >= updated.length) {
+        setCurrentTrackIndex(0);
       }
-    } else if (index < currentTrackIndex) {
-      setCurrentTrackIndex((prev) => prev - 1);
-    }
+      return updated;
+    });
   };
 
-  const toggleBgMusic = (): void => {
-    if (!audioRef.current || playlist.length === 0) return;
-    if (isMusicPlaying) {
-      audioRef.current.pause();
-      setIsMusicPlaying(false);
-    } else {
-      audioRef.current
-        .play()
-        .then(() => setIsMusicPlaying(true))
-        .catch(() => {});
-    }
+  const handlePrevTrack = (): void => {
+    if (playlist.length === 0) return;
+    const nextIdx = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+    handleSelectTrack(nextIdx);
   };
 
   const handleNextTrack = (): void => {
     if (playlist.length === 0) return;
     const nextIdx = (currentTrackIndex + 1) % playlist.length;
-    setCurrentTrackIndex(nextIdx);
-    setIsMusicPlaying(true);
-    if (audioRef.current) {
-      audioRef.current.src = playlist[nextIdx].url;
-      audioRef.current.play().catch(() => setIsMusicPlaying(false));
-    }
+    handleSelectTrack(nextIdx);
   };
 
-  const handlePrevTrack = (): void => {
+  const toggleBgMusic = (): void => {
     if (playlist.length === 0) return;
-    const prevIdx = (currentTrackIndex - 1 + playlist.length) % playlist.length;
-    setCurrentTrackIndex(prevIdx);
-    setIsMusicPlaying(true);
-    if (audioRef.current) {
-      audioRef.current.src = playlist[prevIdx].url;
-      audioRef.current.play().catch(() => setIsMusicPlaying(false));
+    if (isMusicPlaying) {
+      setIsMusicPlaying(false);
+      if (audioRef.current) audioRef.current.pause();
+    } else {
+      setIsMusicPlaying(true);
+      if (audioRef.current) {
+        if (!audioRef.current.src && playlist[currentTrackIndex]) {
+          audioRef.current.src = playlist[currentTrackIndex].url;
+        }
+        audioRef.current.play().catch(() => setIsMusicPlaying(false));
+      }
     }
   };
 
   const handleExecuteImport = (): void => {
-    if (!importSourceText.trim()) return;
+    const sourceText = importSourceText.trim();
+    if (!sourceText) {
+      alert("Please paste Markdown/JSON content or upload a file first.");
+      return;
+    }
 
     try {
-      const parsedJSON = JSON.parse(importSourceText) as {
+      const parsedJSON = JSON.parse(sourceText) as {
         version?: number;
         subjects?: Subject[];
         id?: string;
@@ -1490,7 +1558,7 @@ FINAL CHECK (silently, before sending)
       ) {
         const importedSubject: Subject = {
           ...(parsedJSON as Subject),
-          id: "sub-" + Date.now(),
+          id: uid("sub"),
         };
         setSubjects((prev: Subject[]) => [...prev, importedSubject]);
         setIsImportModalOpen(false);
@@ -1502,10 +1570,11 @@ FINAL CHECK (silently, before sending)
       // Markdown fallback
     }
 
-    const { subjectTitle, topics: mdTopics } =
-      parseStudyMarkdown(importSourceText);
+    const { subjectTitle, topics: mdTopics } = parseStudyMarkdown(sourceText);
     if (mdTopics.length === 0) {
-      alert("Could not parse any valid questions from the provided text.");
+      alert(
+        "Could not parse any valid questions from the provided file or text. Please ensure the file uses valid StudyNode Markdown format.",
+      );
       return;
     }
 
@@ -1513,11 +1582,10 @@ FINAL CHECK (silently, before sending)
       let updatedTopics: Topic[] = [...activeSubject.topics];
 
       if (importTargetTopicMode === "existing" && importTargetTopicId) {
-        // Merge into user-chosen existing topic
         const allItems: Item[] = mdTopics
           .flatMap((t: ParsedTopic) => t.items)
-          .map((it: ParsedItem, iIdx: number) => ({
-            id: "item-" + Date.now() + "-" + iIdx,
+          .map((it: ParsedItem) => ({
+            id: uid("item"),
             prompt: it.prompt,
             options: it.options,
             explanation: it.explanation,
@@ -1533,33 +1601,31 @@ FINAL CHECK (silently, before sending)
         importTargetTopicMode === "custom" &&
         importCustomTopicTitle.trim()
       ) {
-        // Create topic with explicit title typed by user
         const allItems: Item[] = mdTopics
           .flatMap((t: ParsedTopic) => t.items)
-          .map((it: ParsedItem, iIdx: number) => ({
-            id: "item-" + Date.now() + "-" + iIdx,
+          .map((it: ParsedItem) => ({
+            id: uid("item"),
             prompt: it.prompt,
             options: it.options,
             explanation: it.explanation,
           }));
 
         updatedTopics.push({
-          id: "top-" + Date.now(),
+          id: uid("top"),
           order: updatedTopics.length + 1,
           title: importCustomTopicTitle.trim(),
           description: "Custom imported topic",
           items: allItems,
         });
       } else {
-        // Auto-create topics from markdown headers
-        mdTopics.forEach((mdT: ParsedTopic, idx: number) => {
+        mdTopics.forEach((mdT: ParsedTopic) => {
           updatedTopics.push({
-            id: "top-" + Date.now() + "-" + idx,
+            id: uid("top"),
             order: updatedTopics.length + 1,
             title: mdT.title,
             description: mdT.description,
-            items: mdT.items.map((it: ParsedItem, iIdx: number) => ({
-              id: "item-" + Date.now() + "-" + idx + "-" + iIdx,
+            items: mdT.items.map((it: ParsedItem) => ({
+              id: uid("item"),
               prompt: it.prompt,
               options: it.options,
               explanation: it.explanation,
@@ -1575,7 +1641,7 @@ FINAL CHECK (silently, before sending)
         ),
       );
       alert(`Successfully imported topics into "${activeSubject.title}"!`);
-    } else if (!activeSubject) {
+    } else {
       const colors = [
         "var(--lime)",
         "var(--yellow)",
@@ -1583,24 +1649,24 @@ FINAL CHECK (silently, before sending)
         "var(--slate)",
       ];
       const newSub: Subject = {
-        id: "sub-" + Date.now(),
+        id: uid("sub"),
         title: subjectTitle,
         description: "Imported from StudyNode Markdown file",
         color: colors[subjects.length % colors.length],
-        icon: BookOpen,
+        iconName: "book",
         topics: mdTopics.map((t: ParsedTopic, idx: number) => ({
-          id: "top-" + Date.now() + "-" + idx,
+          id: uid("top"),
           order: idx + 1,
           title: t.title,
           description: t.description,
-          items: t.items.map((it: ParsedItem, iIdx: number) => ({
-            id: "item-" + Date.now() + "-" + idx + "-" + iIdx,
+          items: t.items.map((it: ParsedItem) => ({
+            id: uid("item"),
             prompt: it.prompt,
             options: it.options.length
               ? it.options
               : [
-                  { id: "opt-1", text: "Option A", correct: true },
-                  { id: "opt-2", text: "Option B", correct: false },
+                  { id: uid("opt"), text: "Option A", correct: true },
+                  { id: uid("opt"), text: "Option B", correct: false },
                 ],
             explanation: it.explanation,
           })),
@@ -1614,6 +1680,7 @@ FINAL CHECK (silently, before sending)
     setImportSourceText("");
   };
 
+  // Close dropdown menus when clicking outside
   // Close dropdown menus when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: globalThis.MouseEvent): void => {
@@ -1975,8 +2042,8 @@ FINAL CHECK (silently, before sending)
                     (acc: number, t: Topic) => acc + t.items.length,
                     0,
                   );
-                  const IconComp =
-                    typeof sub.icon === "function" ? sub.icon : BookOpen;
+                  const IconComponent =
+                    sub.iconName === "terminal" ? Terminal : BookOpen;
                   return (
                     <div
                       key={sub.id}
@@ -1989,7 +2056,7 @@ FINAL CHECK (silently, before sending)
                     >
                       <div className="flex justify-between items-start gap-2">
                         <div className="w-10 h-10 sm:w-12 sm:h-12 bg-[var(--surface)] border-ink shadow-hard rounded-[14px] sm:rounded-[16px] flex items-center justify-center shrink-0">
-                          <IconComp size={20} strokeWidth={2.5} />
+                          <IconComponent size={20} strokeWidth={2.5} />
                         </div>
                         <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap justify-end">
                           <Badge color="var(--surface)">
@@ -2817,6 +2884,26 @@ FINAL CHECK (silently, before sending)
               ))}
             </div>
 
+            <div className="flex items-center gap-2 mt-2">
+              <label className="flex items-center gap-2 text-xs font-bold cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={useCustomTimer}
+                  onChange={(e) => setUseCustomTimer(e.target.checked)}
+                  className="accent-[var(--teal)] cursor-pointer"
+                />
+                Custom Timer (sec):
+              </label>
+              <input
+                type="number"
+                min={1}
+                disabled={!useCustomTimer}
+                value={customTimerInput}
+                onChange={(e) => setCustomTimerInput(e.target.value)}
+                className="w-20 bg-[var(--bg)] border-2 border-[var(--ink)] rounded-xl p-1.5 font-bold text-xs disabled:opacity-40"
+              />
+            </div>
+
             <div className="flex items-center justify-between gap-2 mt-3 p-2.5 rounded-xl border-2 border-[var(--ink)] bg-[var(--bg)]">
               <label className="flex items-center gap-2 text-xs font-bold cursor-pointer">
                 <input
@@ -3027,29 +3114,84 @@ FINAL CHECK (silently, before sending)
             )}
           </div>
 
+          {/* Target Topic Mode Selector (When importing topics inside a Subject) */}
+          {importType === "topic" && activeSubject && (
+            <div className="bg-[var(--bg)] border-2 border-[var(--ink)] rounded-2xl p-3 space-y-2">
+              <label className="block text-xs font-extrabold uppercase">
+                Target Topic Import Mode
+              </label>
+              <div className="grid grid-cols-3 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setImportTargetTopicMode("auto")}
+                  className={`p-1.5 rounded-xl border-2 font-bold text-[11px] cursor-pointer ${importTargetTopicMode === "auto" ? "bg-[var(--yellow)] border-[var(--ink)]" : "bg-[var(--surface)] border-transparent"}`}
+                >
+                  Auto Header
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportTargetTopicMode("existing")}
+                  className={`p-1.5 rounded-xl border-2 font-bold text-[11px] cursor-pointer ${importTargetTopicMode === "existing" ? "bg-[var(--yellow)] border-[var(--ink)]" : "bg-[var(--surface)] border-transparent"}`}
+                >
+                  Existing Topic
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportTargetTopicMode("custom")}
+                  className={`p-1.5 rounded-xl border-2 font-bold text-[11px] cursor-pointer ${importTargetTopicMode === "custom" ? "bg-[var(--yellow)] border-[var(--ink)]" : "bg-[var(--surface)] border-transparent"}`}
+                >
+                  Custom Title
+                </button>
+              </div>
+
+              {importTargetTopicMode === "existing" && (
+                <select
+                  value={importTargetTopicId}
+                  onChange={(e) => setImportTargetTopicId(e.target.value)}
+                  className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-xl p-2 font-bold text-xs cursor-pointer"
+                >
+                  {activeSubject.topics.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      Topic {t.order}: {t.title}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {importTargetTopicMode === "custom" && (
+                <input
+                  type="text"
+                  placeholder="Enter custom topic title..."
+                  value={importCustomTopicTitle}
+                  onChange={(e) => setImportCustomTopicTitle(e.target.value)}
+                  className="w-full bg-[var(--surface)] border border-[var(--ink)] rounded-xl p-2 font-bold text-xs"
+                />
+              )}
+            </div>
+          )}
+
           {/* Import Source Inputs */}
           <div>
-            <div className="flex justify-between items-center mb-1">
-              <label className="block text-xs font-extrabold uppercase">
-                Paste Markdown / JSON Content
-              </label>
-              <label className="text-xs font-extrabold text-[var(--orange)] hover:underline cursor-pointer flex items-center gap-1">
-                <Upload size={12} /> Upload .md / .json
-                <input
-                  type="file"
-                  accept=".md,.markdown,.json"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-              </label>
-            </div>
+            <label className="block text-xs font-extrabold uppercase mb-1">
+              Upload File (.md / .json)
+            </label>
+            <input
+              type="file"
+              accept=".md,.json,.txt"
+              onChange={handleFileUpload}
+              className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-2xl p-2 font-bold text-xs cursor-pointer"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-extrabold uppercase mb-1">
+              Or Paste Document Content
+            </label>
             <textarea
               rows={6}
               value={importSourceText}
-              onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
-                setImportSourceText(e.target.value)
-              }
-              placeholder="Paste StudyNode .md content or JSON file here..."
+              onChange={(e) => setImportSourceText(e.target.value)}
+              placeholder="Paste raw Markdown or JSON content here..."
               className="w-full bg-[var(--bg)] border-2 border-[var(--ink)] rounded-2xl p-3 font-mono text-xs outline-none focus:bg-[var(--surface)]"
             />
           </div>
@@ -3076,7 +3218,6 @@ FINAL CHECK (silently, before sending)
   );
 }
 
-// --- Intelligent Quiz Runner Component with 4 Distinct Option Colors & Optional Auto-Advance ---
 interface IntelligentQuizRunnerProps {
   title: string;
   questions: Item[];
@@ -3086,6 +3227,7 @@ interface IntelligentQuizRunnerProps {
   onExit: () => void;
 }
 
+// --- Intelligent Quiz Runner Component ---
 const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
   title,
   questions,
@@ -3116,7 +3258,23 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
     null,
   );
 
-  // 4 Distinct Retro Box Backgrounds matching classic Babadum style
+  // Stale closure refs for interval callbacks
+  const isAnsweredRef = useRef<boolean>(isAnswered);
+  const currentIndexRef = useRef<number>(currentIndex);
+  const questionsRef = useRef<Item[]>(questions);
+
+  useEffect(() => {
+    isAnsweredRef.current = isAnswered;
+  }, [isAnswered]);
+
+  useEffect(() => {
+    currentIndexRef.current = currentIndex;
+  }, [currentIndex]);
+
+  useEffect(() => {
+    questionsRef.current = questions;
+  }, [questions]);
+
   const optionBoxColors = [
     "bg-[#EFE8D8] border-[var(--ink)] hover:bg-[var(--yellow)]/40",
     "bg-[#E9E4D4] border-[var(--ink)] hover:bg-[var(--lime)]/40",
@@ -3126,6 +3284,46 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
 
   const currentQuestion = questions[currentIndex];
 
+  const handleNextQuestion = useCallback((): void => {
+    if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current);
+    setSelectedOptId(null);
+    setIsAnswered(false);
+    setAutoAdvanceCountdown(null);
+    setStreakPopup(null);
+
+    if (currentIndexRef.current + 1 < questionsRef.current.length) {
+      setCurrentIndex((prev) => prev + 1);
+    } else {
+      setIsFinished(true);
+      playSound("victory", soundEnabled);
+    }
+  }, [soundEnabled]);
+
+  const triggerAutoAdvance = useCallback((): void => {
+    setAutoAdvanceCountdown(100);
+    if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current);
+    autoAdvanceTimerRef.current = setTimeout(() => {
+      handleNextQuestion();
+    }, 1500);
+  }, [handleNextQuestion]);
+
+  const handleTimeOut = useCallback((): void => {
+    if (isAnsweredRef.current) return;
+    setIsAnswered(true);
+    playSound("wrong", soundEnabled);
+    setStreak(0);
+    const q = questionsRef.current[currentIndexRef.current];
+    if (q) {
+      setUserAnswers((prev) => [
+        ...prev,
+        { question: q, chosenOptId: null, isCorrect: false },
+      ]);
+    }
+    if (autoAdvance) {
+      triggerAutoAdvance();
+    }
+  }, [soundEnabled, autoAdvance, triggerAutoAdvance]);
+
   // Cleanup auto-advance timer on unmount
   useEffect(() => {
     return () => {
@@ -3134,12 +3332,16 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
     };
   }, []);
 
-  // Per-Question Timer Logic
+  // Per-Question Timer Logic with Ref Guards
   useEffect(() => {
     if (timerSecondsDefault <= 0 || isAnswered || isFinished) return;
 
     setTimeLeft(timerSecondsDefault);
     const interval = setInterval(() => {
+      if (isAnsweredRef.current) {
+        clearInterval(interval);
+        return;
+      }
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
@@ -3152,21 +3354,14 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [currentIndex, isAnswered, isFinished, timerSecondsDefault]);
-
-  const handleTimeOut = (): void => {
-    if (isAnswered) return;
-    setIsAnswered(true);
-    playSound("wrong", soundEnabled);
-    setStreak(0);
-    setUserAnswers((prev) => [
-      ...prev,
-      { question: currentQuestion, chosenOptId: null, isCorrect: false },
-    ]);
-    if (autoAdvance) {
-      triggerAutoAdvance();
-    }
-  };
+  }, [
+    currentIndex,
+    isAnswered,
+    isFinished,
+    timerSecondsDefault,
+    soundEnabled,
+    handleTimeOut,
+  ]);
 
   const handleSelectOption = (optId: string): void => {
     if (isAnswered) return;
@@ -3177,6 +3372,11 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
       (o: ItemOption) => o.id === optId,
     );
     const isCorrect = !!chosenOpt?.correct;
+
+    setUserAnswers((prev) => [
+      ...prev,
+      { question: currentQuestion, chosenOptId: optId, isCorrect },
+    ]);
 
     if (isCorrect) {
       playSound("correct", soundEnabled);
@@ -3203,68 +3403,28 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
       setStreakPopup(null);
     }
 
-    setUserAnswers((prev) => [
-      ...prev,
-      { question: currentQuestion, chosenOptId: optId, isCorrect },
-    ]);
-
     if (autoAdvance) {
       triggerAutoAdvance();
     }
   };
 
-  const triggerAutoAdvance = (): void => {
-    setAutoAdvanceCountdown(100);
-    if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current);
-    autoAdvanceTimerRef.current = setTimeout(() => {
-      handleNextQuestion();
-    }, 1500);
-  };
-
-  const handleNextQuestion = (): void => {
-    if (autoAdvanceTimerRef.current) clearTimeout(autoAdvanceTimerRef.current);
-    setSelectedOptId(null);
-    setIsAnswered(false);
-    setAutoAdvanceCountdown(null);
-    setStreakPopup(null);
-
-    if (currentIndex + 1 < questions.length) {
-      setCurrentIndex((prev) => prev + 1);
-    } else {
-      setIsFinished(true);
-      playSound("victory", soundEnabled);
-    }
-  };
-
-  if (!currentQuestion && !isFinished) {
-    return (
-      <div className="text-center py-12">
-        <h3 className="font-extrabold text-xl">No questions available!</h3>
-        <Button onClick={onExit} className="mt-4 mx-auto">
-          Return to Subject
-        </Button>
-      </div>
-    );
-  }
-
-  // Quiz Completion Screen
-  if (isFinished) {
-    const percentage = Math.round((score / questions.length) * 100);
-    let titleMsg = "Good Effort! 💪";
-    let subMsg = "Keep practicing to master this topic!";
+  if (isFinished || questions.length === 0) {
+    const percentage =
+      questions.length > 0 ? Math.round((score / questions.length) * 100) : 0;
+    let titleMsg = "Quiz Complete! 🎉";
+    let subMsg = "Great practice session!";
     if (percentage >= 90) {
-      titleMsg = "🎉 ABSOLUTE MASTERY!";
-      subMsg = "Outstanding performance! You aced this quiz!";
-    } else if (percentage >= 70) {
-      titleMsg = "🌟 GREAT JOB!";
-      subMsg =
-        "Solid understanding! A little more practice and you will be perfect.";
+      titleMsg = "Mastery Achieved! 🏆";
+      subMsg = "Outstanding score! You have strong command of this material.";
+    } else if (percentage < 60) {
+      titleMsg = "Keep Practicing! 💪";
+      subMsg = "Review the explanation breakdown below to improve your score.";
     }
 
     return (
-      <div className="max-w-2xl mx-auto space-y-4 sm:space-y-6 bg-[var(--surface)] border-ink shadow-hard rounded-[24px] sm:rounded-[32px] p-4 sm:p-6 md:p-10 text-center animate-streak">
-        <div className="w-16 h-16 sm:w-20 sm:h-20 bg-[var(--yellow)] border-ink shadow-hard rounded-full flex items-center justify-center mx-auto text-3xl sm:text-4xl animate-bounce">
-          {percentage >= 70 ? "🏆" : "📚"}
+      <div className="bg-[var(--surface)] border-[3px] border-[var(--ink)] shadow-hard rounded-[32px] p-6 sm:p-10 max-w-2xl mx-auto space-y-6 text-center animate-streak">
+        <div className="w-16 h-16 sm:w-20 sm:h-20 bg-[var(--yellow)] border-[3px] border-[var(--ink)] shadow-hard rounded-full flex items-center justify-center mx-auto logo-blob">
+          <Award size={36} className="text-[var(--ink)]" strokeWidth={2.5} />
         </div>
 
         <div>
@@ -3304,7 +3464,7 @@ const IntelligentQuizRunner: React.FC<IntelligentQuizRunnerProps> = ({
         </div>
 
         {/* Question Performance Review */}
-        <div className="text-left space-y-2 sm:space-y-3 pt-1">
+        <div className="space-y-3 text-left">
           <h4 className="font-extrabold text-base sm:text-lg border-b-2 border-[var(--ink)]/15 pb-2">
             Question Performance Breakdown
           </h4>
